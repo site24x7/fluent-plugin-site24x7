@@ -64,8 +64,13 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
     @s247_http_client.shutdown if @s247_http_client
   end
 
+  def base64_url_decode(str)
+     str += '=' * (4 - str.length.modulo(4))
+     Base64.decode64(str.tr('-_','+/'))
+  end
+  
   def init_variables()
-    @logtype_config = Yajl::Parser.parse(Base64.decode64(@log_type_config))
+    @logtype_config = Yajl::Parser.parse(base64_url_decode(@log_type_config))
     @s247_custom_regex = if @logtype_config.has_key? 'regex' then Regexp.compile(@logtype_config['regex'].gsub('?P<','?<')) else nil end
     @s247_ignored_fields = if @logtype_config.has_key? 'ignored_fields' then @logtype_config['ignored_fields'] else [] end
     @s247_tz = {'hrs': 0, 'mins': 0} #UTC
@@ -76,12 +81,12 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
     @s247_datetime_format_string = @logtype_config['dateFormat']
     @s247_datetime_format_string = @s247_datetime_format_string.sub('%f', '%N')
     if !@s247_datetime_format_string.include? 'unix'
-      is_year_present = if @s247_datetime_format_string.include?('%y') || @s247_datetime_format_string.include?('%Y') then true else false end
-      if !is_year_present
+      @is_year_present = if @s247_datetime_format_string.include?('%y') || @s247_datetime_format_string.include?('%Y') then true else false end
+      if !@is_year_present
 	@s247_datetime_format_string = @s247_datetime_format_string+ ' %Y'
       end   
-      is_timezone_present = if @s247_datetime_format_string.include? '%z' then true else false end
-      if !is_timezone_present && @logtype_config.has_key?('timezone')
+      @is_timezone_present = if @s247_datetime_format_string.include? '%z' then true else false end
+      if !@is_timezone_present && @logtype_config.has_key?('timezone')
 	tz_value = @logtype_config['timezone']
 	if tz_value.start_with?('+')
 	    @s247_tz['hrs'] = Integer('-' + tz_value[1..4])
@@ -120,8 +125,8 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
         if @s247_datetime_format_string.include? 'unix'
             return (if @s247_datetime_format_string == 'unix' then datetime_string+'000' else datetime_string end)
         end
-        datetime_string += if !is_year_present then ' '+String(Time.new.year) else '' end
-        if !is_timezone_present
+        datetime_string += if !@is_year_present then ' '+String(Time.new.year) else '' end
+        if !@is_timezone_present && @logtype_config.has_key?('timezone')
             @s247_datetime_format_string += '%z'
             time_zone = String(@s247_tz['hrs'])+':'+String(@s247_tz['mins'])
             datetime_string += if time_zone.start_with?('-') then time_zone else '+'+time_zone end
@@ -150,6 +155,8 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
 		    formatted_line.merge!(log_fields)
                     parsed_lines.push(formatted_line)
 		    log_size -= removed_log_size
+                else
+                    log.debug "pattern not matched regex : #{@s247_custom_regex} and received line : #{line}"
 		end
 	    rescue Exception => e
 		log.error "Exception in parse_line #{e.backtrace}"
@@ -345,7 +352,7 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
           end
         end
       rescue Exception => e
-        log.error "Exception occurred in sendig logs : #{e}"
+        log.error "Exception occurred in sendig logs : #{e.backtrace}"
       end
   end
 

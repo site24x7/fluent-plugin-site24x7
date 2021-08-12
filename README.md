@@ -64,6 +64,7 @@ http_read_timeout | Timeout (in seconds) when the socket connects until the conn
 http_proxy | Your proxy uri | nil
 
 ## Release Notes
+* 0.1.2 - Timezone parsing issue fixed
 * 0.1.1 - Minor changes
 * 0.1.0 - Initial Release
 
