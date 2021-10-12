@@ -210,7 +210,7 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
         if !line.empty?
           current_log_size = 0
 	  formatted_line = {}
-	  event_obj = Yajl::Parser.parse(line)
+          event_obj = if line.is_a?(String) then Yajl::Parser.parse(line) else line end
 	  @logtype_config['jsonPath'].each do |path_obj|
 	    value = get_json_value(event_obj, path_obj[if path_obj.has_key?'key' then 'key' else 'name' end], path_obj['type'])
             if value
@@ -231,7 +231,7 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
 
   def format(tag, time, record)
     if @valid_logtype && (@log_upload_allowed || (time.to_i - @log_upload_stopped_time > S247_LOG_UPLOAD_CHECK_INTERVAL))
-       [record['message']].to_msgpack
+      if !@logtype_config.has_key?'jsonPath' then [record['message']].to_msgpack  else [record].to_msgpack end
     end
   end
 
@@ -262,7 +262,7 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
     current_batch = []
     current_batch_size = 0
     encoded_events.each_with_index do |encoded_event, i|
-      current_event_size = encoded_event.bytesize
+      current_event_size = String(encoded_event).bytesize
       if current_event_size > S247_MAX_RECORD_SIZE
         encoded_event = encoded_event[0..(S247_MAX_RECORD_SIZE-DD_TRUNCATION_SUFFIX.length)]+DD_TRUNCATION_SUFFIX
         current_event_size = encoded_event.bytesize
