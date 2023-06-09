@@ -143,9 +143,13 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
       for field,rules in @logtype_config['filterConfig'] do
         temp = []
         for value in @logtype_config['filterConfig'][field]['values'] do
-          temp.push(Regexp.compile(value))
+          if @logtype_config['filterConfig'][field]['exact']
+            temp.push("\\A"+value+"\\Z")
+          else
+            temp.push(value)
+          end
         end
-        @logtype_config['filterConfig'][field]['values'] = temp.join('|') 
+        @logtype_config['filterConfig'][field]['values'] = Regexp.compile(temp.join('|')) 
       end
     end  
     
@@ -165,13 +169,13 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
       if !@is_timezone_present && @logtype_config.has_key?('timezone')
   @s247_datetime_format_string += '%z'
 	tz_value = @logtype_config['timezone']
-	if tz_value.start_with?('+')
-	    @s247_tz['hrs'] = Integer('-' + tz_value[1..4])
-	    @s247_tz['mins'] = Integer('-' + tz_value[3..6])
-	elsif tz_value.start_with?('-')
-	    @s247_tz['hrs'] = Integer('+' + tz_value[1..4])
-	    @s247_tz['mins'] = Integer('+' + tz_value[3..6])
-	end
+  if tz_value.start_with?('+')
+    @s247_tz['hrs'] = Integer('-' + tz_value[1..2])
+    @s247_tz['mins'] = Integer('-' + tz_value[3..4])
+  elsif tz_value.start_with?('-')
+    @s247_tz['hrs'] = Integer('+' + tz_value[1..2])
+    @s247_tz['mins'] = Integer('+' + tz_value[3..4])
+  end
       end
     end
     Thread.new { timer_task() }
@@ -216,10 +220,21 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
     end
   end
 
-  def log_line_filter()
-    applyMasking()
-    applyHashing()
-    getDerivedFields()
+  def data_collector()
+    if @formatted_line.has_key?('_zl_timestamp')
+      applyMasking()
+      applyHashing()
+      getDerivedFields()
+      if !is_filters_matched()
+        @formatted_line = {}
+        return
+      end
+      remove_ignored_fields()
+      log_size_calculation()
+    else
+      @formatted_line = {}
+      return
+    end
   end 
 
   def get_last_group_inregex(s247_custom_regex)
@@ -228,7 +243,9 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
 
   def remove_ignored_fields()
     @s247_ignored_fields.each do |field_name|
-      @log_size -= if @log_fields.has_key?field_name then @log_fields.delete(field_name).bytesize else 0 end
+      if @formatted_line.has_key?field_name
+        @formatted_line.delete(field_name)
+      end
     end
   end
 
@@ -245,10 +262,7 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
           match = line.match(@s247_custom_regex)
           if match
             @formatted_line.update(@old_formatted_line)
-            @log_size += @old_log_size
-            @old_log_size = line.bytesize
             @log_fields = match&.named_captures
-            remove_ignored_fields()
             add_message_metadata()
             @old_formatted_line = @log_fields
             @last_line_matched = true
@@ -262,14 +276,13 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
                 @old_log_size += line.bytesize
                 @trace_started = true
                 @last_line_matched = false
-              end 
+              end
             end
-          end   
-          if @formatted_line.has_key?('_zl_timestamp')
-            log_line_filter()
+          end
+          data_collector()
+          if @formatted_line.length >0
             parsed_lines.push(@formatted_line)
-            @formatted_line = {}
-          end    
+          end     
         rescue Exception => e
           log.error "Exception in parse_line #{e.backtrace}"
           @formatted_line = {}
@@ -283,12 +296,14 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
     begin
       if @logtype_config.has_key?'filterConfig'
         @logtype_config['filterConfig'].each do |config,value|
-          if @formatted_line[config].scan(Regexp.new(@logtype_config['filterConfig'][config]['values'])).length > 0
-            val = true 
-          else
-            val = false
+          if (@formatted_line.has_key?config)
+            if @logtype_config['filterConfig'][config]['values'].match(@formatted_line[config])
+              val = true 
+            else
+              val = false
+            end
           end
-          if (@formatted_line.has_key?config) && (@logtype_config['filterConfig'][config]['match'] ^ (val))
+          if (@logtype_config['filterConfig'][config]['match'] ^ (val))
             return false
           end
         end
@@ -342,20 +357,18 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
         matcher = regex.match(@log_fields.delete(key))
         if matcher
           @log_fields.update(matcher.named_captures)
-          remove_ignored_fields()
           @formatted_line.update(@log_fields)
         end 
       end
     end
-    if !(is_filters_matched())
-      return false
-    else
-      add_message_metadata()
-      @formatted_line.update(@log_fields)
-      log_line_filter()
-      @log_size += json_log_size
+    add_message_metadata()
+    @formatted_line.update(@log_fields)
+    data_collector()
+    if @formatted_line.length >0
       return true
-     end
+    else
+      return false
+    end 
   end
 
   def json_log_parser(lines)
@@ -367,7 +380,7 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
           if line[0] == '{' && @json_data[-1] == '}'
             if json_log_applier(@json_data)
               parsed_lines.push(@formatted_line)
-              end
+            end
             @json_data=''
           end
           @json_data += line
@@ -380,20 +393,14 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
   end
 
   def ml_regex_applier(ml_trace, ml_data)
-    begin    
-      @log_size += @ml_trace.bytesize
+    begin
       matcher = @s247_custom_regex.match(@ml_trace)  
       @log_fields = matcher.named_captures
       @log_fields.update(@ml_data)
-      if @s247_ignored_fields
-        remove_ignored_fields()
-      end
       add_message_metadata()
       @formatted_line.update(@log_fields)
-      log_line_filter()
     rescue Exception => e
       log.error "Exception occurred in ml_parser : #{e.backtrace}"
-      @formatted_line = {}
     end
   end
   
@@ -413,14 +420,15 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
                   ml_regex_applier(@ml_trace, @ml_data)
                   if @ml_trace_buffer && @formatted_line
                       @formatted_line[@message_key] = @formatted_line[@message_key] + @ml_trace_buffer
-                      @log_size += @ml_trace_buffer.bytesize
                   end
-                  parsed_lines.push(@formatted_line)
+                  data_collector()
+                  if @formatted_line.length >0
+                    parsed_lines.push(@formatted_line)
+                  end    
                   @ml_trace = ''
                   @ml_trace_buffer = ''
                   if @ml_found
                     @ml_data = ml_start_matcher.named_captures
-                    @log_size += line.bytesize
                   else
                       @ml_data = {}
                   end
@@ -429,7 +437,6 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
                 log.error "Exception occurred in ml_parser : #{e.backtrace}"
                 end
             elsif @ml_found
-              @log_size += line.bytesize
               @ml_data = ml_start_matcher.named_captures
             end
           elsif @ml_found
@@ -551,7 +558,7 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
           begin
             response = @s247_http_client.request @uri, request
             resp_headers = response.each_header.to_h
-
+            
             if response.code == '200'
               if resp_headers.has_key?'LOG_LICENSE_EXCEEDS' && resp_headers['LOG_LICENSE_EXCEEDS'] == 'True'
                 log.error "Log license limit exceeds so not able to send logs"
@@ -564,6 +571,9 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
               elsif resp_headers.has_key?'INVALID_LOGTYPE' && resp_headers['INVALID_LOGTYPE'] == 'True'
                 log.error "Log type not present in this account so stopping log collection"
 		            @valid_logtype = false
+              elsif resp_headers['x-uploadid'] == nil
+                log.error "upload id is empty hence retry flag enabled #{gzipped_parsed_lines.size} / #{@log_size}"
+                need_retry = true
               else
 		            @log_upload_allowed = true
                 log.debug "Successfully sent logs with size #{gzipped_parsed_lines.size} / #{@log_size} to site24x7. Upload Id : #{resp_headers['x-uploadid']}"
@@ -599,8 +609,7 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
         ml_regex_applier(@ml_trace, @ml_data)
         if @ml_trace_buffer
           if !(@formatted_line.empty?)
-            @formatted_line[@message_key] = @formatted_line[@message_key] + @ml_trace_buffer
-            @log_size += @ml_trace_buffer.bytesize  
+            @formatted_line[@message_key] = @formatted_line[@message_key] + @ml_trace_buffer 
           else
             @ml_trace += @ml_trace_buffer.gsub('\n', '<NewLine>')
             ml_regex_applier(@ml_trace, @ml_data)
@@ -615,10 +624,8 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
         @json_data = ''
       elsif @old_formatted_line
         @formatted_line.update(@old_formatted_line)
-        log_line_filter()
-        @log_size += @old_log_size
+        data_collector()
         @old_formatted_line = {}
-        @old_log_size = 0
       end
       @logged = true
       if @format_record
@@ -654,9 +661,7 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
                 end
               end
               @formatted_line[key] = field_value
-              @log_size -= adjust_length
             else
-              @log_size -= (@formatted_line[key].bytesize - @masking_config[key]['string'].bytesize)
               @formatted_line[key] = @masking_config[key]['string']
             end
           end
@@ -693,11 +698,6 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
                   end
                 end
               end
-            end 
-            if adjust_length
-              @log_size -= adjust_length
-            else
-              @log_size -= (@formatted_line[key].bytesize - field_value.bytesize)
             end
             @formatted_line[key] = field_value
           end
@@ -716,10 +716,7 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
               if @formatted_line.has_key?key
                 match_derived = each.match(@formatted_line[key])
                 if match_derived
-                  @formatted_line.update(match_derived.named_captures)
-                  for field_name,value in match_derived.named_captures do
-                    @log_size += @formatted_line[field_name].bytesize
-                  end  
+                  @formatted_line.update(match_derived.named_captures) 
                 end
                 break
               end
@@ -727,10 +724,19 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
         end
       rescue Exception => e
         log.error "Exception occurred in derived fields : #{e.backtrace}"
-      end  
+      end
     end
   end
   
+  def log_size_calculation()
+    data_exclusion = ["_zl", "s247", "inode"]
+    @formatted_line.each do |field, value|
+      unless data_exclusion.any? { |exclusion| field.start_with?(exclusion) }
+        @log_size += value.to_s.bytesize
+      end
+    end
+  end
+
   def timer_task()
     while true
       @after_time = Time.now
