@@ -57,13 +57,16 @@ As fluent-plugin-site24x7 is an output_buffer, you can set all the output_buffer
 Property | Description | Default Value
 ------------ | -------------|------------
 log_type_config | log_type_config of your configured log type in site24x7 | nil
-max_retry | Number of times to resend failed uploads | 3
+max_retry | Number of times to resend failed uploads. Set to -1 for unlimited retries | -1
 retry_interval |  Time interval to sleep initially between retries, exponential step-off | 2 seconds
+maxretry_interval | Maximum interval to wait between sending retries | 60 seconds
+retry_timeout | Time after which the data is going to be dropped | 24 hours
 http_idle_timeout | Timeout (in seconds) for which http persistent connection will stay open without traffic | 5 seconds
 http_read_timeout | Timeout (in seconds) when the socket connects until the connection breaks | 30 secods
 http_proxy | Your proxy uri | nil
 
 ## Release Notes
+* 0.1.6 - chunk unique id added for each upload and unlimited retry support
 * 0.1.5 - Retry handled for empty upload-id
 * 0.1.4 - Multi-line log, masking, hasing and derived fields support added
 * 0.1.3 - JSON log parsing issue fixed
