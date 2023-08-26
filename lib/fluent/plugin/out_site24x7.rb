@@ -21,8 +21,10 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
   helpers :compat_parameters
 
   config_param :log_type_config, :string
-  config_param :max_retry, :integer, :default => 3
+  config_param :max_retry, :integer, :default => -1
   config_param :retry_interval, :integer, :default => 2
+  config_param :maxretry_interval, :integer, :default => 60 #1 minutes 
+  config_param :retry_timeout, :integer, :default => 24 * 3600  # 24 hours
   config_param :http_idle_timeout, :integer, default: 5
   config_param :http_read_timeout, :integer, default: 30
   config_param :http_proxy, :string, :default => nil
@@ -212,11 +214,12 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
             time_zone = String(@s247_tz['hrs'])+':'+String(@s247_tz['mins'])
             datetime_string += if time_zone.start_with?('-') then time_zone else '+'+time_zone end
         end
+        #log.info "datetime_string : (#{datetime_string}), s247_datetime_format_string: (#{@s247_datetime_format_string})"
         datetime_data = DateTime.strptime(datetime_string, @s247_datetime_format_string)
         return Integer(datetime_data.strftime('%Q'))
     rescue Exception => e
-      @logger.error "Exception in parsing date: #{e.backtrace}"
-        return 0
+      log.error "Exception in parsing date: #{e.message}"
+      return 0
     end
   end
 
@@ -470,26 +473,27 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
   end     
 
   def write(chunk)
+    current_chunk_id = "#{chunk.dump_unique_id_hex(chunk.unique_id)}"
     begin
-	events = Array.new
-	chunk.msgpack_each do |record|
-	  next if record.empty?
-	  events.push record[0]
-	end
-	process_http_events(events)
+      events = Array.new
+      chunk.msgpack_each do |record|
+        next if record.empty?
+        events.push record[0]
+      end
+      process_http_events(events, current_chunk_id)
     rescue Exception => e
       log.error "Exception #{e.backtrace}"
     end
   end
 
-  def process_http_events(events)
+  def process_http_events(events, current_chunk_id)
     @before_time = Time.now
     batches = batch_http_events(events)
     batches.each do |batched_event|
       formatted_events, @log_size = format_http_event_batch(batched_event)
       if (formatted_events.length>0)
         formatted_events = gzip_compress(formatted_events)
-        send_logs_to_s247(formatted_events, @log_size)
+        send_logs_to_s247(formatted_events, @log_size, current_chunk_id)
       end
     end 
   end
@@ -547,52 +551,73 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
     gz.string
   end
 
-  def send_logs_to_s247(gzipped_parsed_lines, log_size)
+  def send_logs_to_s247(gzipped_parsed_lines, log_size, current_chunk_id)
       request = Net::HTTP::Post.new @uri.request_uri
       request.body = gzipped_parsed_lines
-      @s247_http_client.override_headers["Log-Size"] = @log_size
+
       sleep_interval = @retry_interval
      begin
-        @max_retry.times do |counter|
+        retries = 0
+        first_upload_time =  Time.now
+        while true
           need_retry = false
           begin
+            @s247_http_client.override_headers["Log-Size"] = @log_size
+            @s247_http_client.override_headers["upload-id"] = current_chunk_id
             response = @s247_http_client.request @uri, request
             resp_headers = response.each_header.to_h
             
             if response.code == '200'
-              if resp_headers.has_key?'LOG_LICENSE_EXCEEDS' && resp_headers['LOG_LICENSE_EXCEEDS'] == 'True'
-                log.error "Log license limit exceeds so not able to send logs"
-                @log_upload_allowed = false
-		            @log_upload_stopped_time =Time.now.to_i
-              elsif resp_headers.has_key?'BLOCKED_LOGTYPE' && resp_headers['BLOCKED_LOGTYPE'] == 'True'
-                log.error "Max upload limit reached for log type"
-                @log_upload_allowed = false
-		            @log_upload_stopped_time =Time.now.to_i
-              elsif resp_headers.has_key?'INVALID_LOGTYPE' && resp_headers['INVALID_LOGTYPE'] == 'True'
-                log.error "Log type not present in this account so stopping log collection"
-		            @valid_logtype = false
-              elsif resp_headers['x-uploadid'] == nil
-                log.error "upload id is empty hence retry flag enabled #{gzipped_parsed_lines.size} / #{@log_size}"
+              if resp_headers['x-uploadid'] == nil
+                log.error "[#{current_chunk_id}]:upload id is empty hence retry flag enabled #{resp_headers}"
                 need_retry = true
               else
 		            @log_upload_allowed = true
-                log.debug "Successfully sent logs with size #{gzipped_parsed_lines.size} / #{@log_size} to site24x7. Upload Id : #{resp_headers['x-uploadid']}"
+                log.debug "[#{current_chunk_id}]:Successfully sent logs with size #{gzipped_parsed_lines.size} / #{@log_size} to site24x7. Upload Id : #{resp_headers['x-uploadid']}"
+              end
+            elsif response.code == '400'
+              if resp_headers.has_key?'log_license_exceeds' and resp_headers['log_license_exceeds'] == 'True'
+                log.error "[#{current_chunk_id}]:Log license limit exceeds so not able to send logs"
+                @log_upload_allowed = false
+		            @log_upload_stopped_time =Time.now.to_i
+              elsif resp_headers.has_key?'blocked_logtype' and resp_headers['blocked_logtype'] == 'True'
+                log.error "[#{current_chunk_id}]:Max upload limit reached for log type"
+                @log_upload_allowed = false
+		            @log_upload_stopped_time =Time.now.to_i
+              elsif resp_headers.has_key?'api_upload_enabled' and resp_headers['api_upload_enabled'] == 'False'
+                log.error "[#{current_chunk_id}]:API upload not enabled for log type : "
+                @log_upload_allowed = false
+		            @log_upload_stopped_time =Time.now.to_i
+              elsif resp_headers.has_key?'invalid_logtype' and resp_headers['invalid_logtype'] == 'True'
+                log.error "[#{current_chunk_id}]:Log type not present in this account so stopping log collection"
+		            @valid_logtype = false
+              elsif resp_headers.has_key?'invalid_account' and resp_headers['invalid_account'] == 'True'
+                log.error "[#{current_chunk_id}]: Invalid account so stopping log collection"
+		            @valid_logtype = false
+              else
+                log.error "[#{current_chunk_id}]: Upload failed for reason : #{response.message}"
               end
             else
-              log.error "Response Code #{resp_headers} from Site24x7, so retrying (#{counter + 1}/#{@max_retry})"
+              log.error "[#{current_chunk_id}]:Response Code #{response.code} from Site24x7, so retrying (#{retries + 1}/#{@max_retry})"
               need_retry = true
             end
           rescue StandardError => e
-            log.error "Error connecting to Site24x7. exception: #{e} (#{counter + 1}/#{@max_retry})"
+            log.error "[#{current_chunk_id}]:Error connecting to Site24x7. exception: #{e} (#{retries + 1}/#{@max_retry})"
+            need_retry = true
           end
 
           if need_retry
-            if counter == @max_retry - 1
-              log.error "Could not send your logs after #{max_retry} tries"
+            retries += 1 
+            if (retries >= @max_retry && @max_retry > 0) || (Time.now > first_upload_time + @retry_timeout && @retry_timeout > 0)
+              log.error "[#{current_chunk_id}]: Internal max retries(#{max_retry}) or retry_timeout : #{first_upload_time + @retry_timeout} reached"
               break
             end
+            log.info "[#{current_chunk_id}]:Going to retry the upload at #{Time.now + sleep_interval}"
             sleep(sleep_interval)
             sleep_interval *= 2
+            if sleep_interval > @maxretry_interval
+                sleep_interval = @maxretry_interval
+            end
           else
             return
           end
@@ -747,7 +772,7 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
           if out != nil
             out = Yajl.dump([out])
             out = gzip_compress(out)
-            send_logs_to_s247(out, @log_size)
+            send_logs_to_s247(out, @log_size, 'holded_line')
           end
         end
       end
