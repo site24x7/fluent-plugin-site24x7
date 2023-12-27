@@ -157,7 +157,6 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
     
     @s247_tz = {'hrs': 0, 'mins': 0} #UTC
     @log_source = Socket.gethostname
-    @valid_logtype = true
     @log_upload_allowed = true
     @log_upload_stopped_time = 0
     @s247_datetime_format_string = @logtype_config['dateFormat']
@@ -461,7 +460,7 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
   end
 
   def format(tag, time, record)
-    if @valid_logtype && (@log_upload_allowed || (time.to_i - @log_upload_stopped_time > S247_LOG_UPLOAD_CHECK_INTERVAL))
+    if (@log_upload_allowed || (time.to_i - @log_upload_stopped_time > S247_LOG_UPLOAD_CHECK_INTERVAL))
       if (record.size == 1)
         if record.has_key?'message'
           [record['message']].to_msgpack
@@ -585,15 +584,14 @@ class Fluent::Site24x7Output < Fluent::Plugin::Output
                 @log_upload_allowed = false
 		            @log_upload_stopped_time =Time.now.to_i
               elsif resp_headers.has_key?'api_upload_enabled' and resp_headers['api_upload_enabled'] == 'False'
-                log.error "[#{current_chunk_id}]:API upload not enabled for log type : "
-                @log_upload_allowed = false
-		            @log_upload_stopped_time =Time.now.to_i
+                log.error "[#{current_chunk_id}]:API upload not enabled for log type"
+                Fluent::Engine.stop
               elsif resp_headers.has_key?'invalid_logtype' and resp_headers['invalid_logtype'] == 'True'
                 log.error "[#{current_chunk_id}]:Log type not present in this account so stopping log collection"
-		            @valid_logtype = false
+                Fluent::Engine.stop
               elsif resp_headers.has_key?'invalid_account' and resp_headers['invalid_account'] == 'True'
                 log.error "[#{current_chunk_id}]: Invalid account so stopping log collection"
-		            @valid_logtype = false
+                Fluent::Engine.stop
               else
                 log.error "[#{current_chunk_id}]: Upload failed for reason : #{response.message}"
               end
