@@ -66,6 +66,7 @@ http_read_timeout | Timeout (in seconds) when the socket connects until the conn
 http_proxy | Your proxy uri | nil
 
 ## Release Notes
+* 0.1.7 - Sending stop signal to Fluentd for unrecoverable errors
 * 0.1.6 - chunk unique id added for each upload and unlimited retry support
 * 0.1.5 - Retry handled for empty upload-id
 * 0.1.4 - Multi-line log, masking, hasing and derived fields support added
