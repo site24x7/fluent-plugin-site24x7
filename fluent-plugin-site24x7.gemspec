@@ -5,7 +5,7 @@ Gem::Specification.new do |spec|
   spec.name    = "fluent-plugin-site24x7"
   spec.version = "0.1.7"
   spec.authors = ["Magesh Rajan"]
-  spec.email   = ["magesh.rajan@zohocorp.com"]
+  spec.email   = ["support@site24x7.com"]
 
   spec.summary       = %q{Site24x7 output plugin for Fluent event collector.}
   spec.homepage      = "https://github.com/site24x7/fluent-plugin-site24x7"
